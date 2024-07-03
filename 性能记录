@@ -1,0 +1,402 @@
+mdmaster_hggp7_dev
+load postgres;ATTACH 'dbname=mdmaster_hggp7_dev user=gpadmin host=127.0.0.1 port=2345' AS gp (TYPE postgres);
+('cost:', 0.1)
+
+	-- tmp_rst_ra_sku_org_detail 取sku表
+	drop table if exists tmp_rst_ra_sku_org_detail;
+	create temporary table tmp_rst_ra_sku_org_detail as
+	select * from postgres_query('gp',$$
+	select a.skc_order_id,
+	      a.model_allot_out_org_sk,a.model_allot_in_org_sk,
+	      a.human_allot_out_org_sk,a.human_allot_in_org_sk,
+	      a.scene_code,a.scene_name,a.remark,a.brand_code,
+	      a.ra_source,a.commit_status,a.modify_status,a.is_effective,a.reserved1,a.reserved9,
+	      a.skc_sk,
+	      a.sku_sk,
+	      a.size_code,
+	      a.commit_user_name,
+	      a.model_ra_qty,
+	      a.human_ra_qty,
+	      a.biz_action_template_code,
+	      a.biz_action_template_name,
+	      a.org_sk,
+	      a.job_id, --任务id
+	      a.task_status, --任务状态
+	      a.document_code, --需求单号
+	      a.batch_id,
+	      a.step_id, --步骤id
+	      a.day_date,
+	      a.compute_status
+	from tenant_hggp7_biz.rst_ra_sku_org_detail a
+	where a.day_date = '2024-04-23' and a.is_deleted = '0'
+	;$$)
+('cost:', 6.49)
+--筛选目标sku
+	drop table if exists tmp_org_sku_distinct;
+	create table tmp_org_sku_distinct as
+	select distinct coalesce(human_allot_out_org_sk,'111') as human_allot_out_org_sk,coalesce(human_allot_in_org_sk,'111') as human_allot_in_org_sk,skc_sk
+	from tmp_rst_ra_sku_org_detail
+	where compute_status in ('1','2','3') --0：未修改；1：已保存；2：已提交； 3：集货
+	;
+('cost:', 0.0)
+--取出被更改状态的单据id 最后需要状态还原为0
+	drop table if exists tmp_distinct_order_id;
+	create table tmp_distinct_order_id as
+	select distinct skc_order_id
+	from tmp_rst_ra_sku_org_detail
+	where compute_status in ('1','2','3') --0：未修改；1：已保存；2：已提交； 3：集货
+	;
+('cost:', 0.0)
+
+	    --tmp_org_skc_union 所需款店
+	    drop table if exists tmp_org_skc_union;
+	    create table tmp_org_skc_union as
+	    select org_sk,skc_sk
+	    from (
+	        select human_allot_out_org_sk as org_sk,skc_sk
+	        from tmp_org_sku_distinct
+	        union all
+	        select human_allot_in_org_sk as org_sk,skc_sk
+	        from tmp_org_sku_distinct
+	    ) aa
+	    group by org_sk,skc_sk
+	    ;
+('cost:', 0.0)
+
+	    drop table if exists tmp_org_sku_distinct;
+	    --tmp_skc_union 所需款
+	    drop table if exists tmp_skc_union;
+	    create table tmp_skc_union as
+	    select skc_sk
+	    from tmp_org_skc_union
+	    group by skc_sk
+	    ;
+('cost:', 0.08)
+   --tmp_sku_target 获取相同款店的单据 --相同款店的单据都需要更新
+	    drop table if exists tmp_sku_target;
+	    create table tmp_sku_target as
+	    select a.skc_order_id,
+	      a.model_allot_out_org_sk,a.model_allot_in_org_sk,
+	      a.human_allot_out_org_sk,a.human_allot_in_org_sk,
+	      a.scene_code,a.scene_name,a.remark,a.brand_code,
+	      a.ra_source,a.commit_status,a.modify_status,a.is_effective,a.reserved1,a.reserved9,
+	      a.skc_sk,
+	      a.sku_sk,
+	      a.size_code,
+	      a.commit_user_name,
+	      a.model_ra_qty,
+	      a.human_ra_qty,
+	      a.biz_action_template_code,
+	      a.biz_action_template_name,
+	      a.org_sk,
+	      a.job_id, --任务id
+	      a.task_status, --任务状态
+	      a.document_code, --需求单号
+	      a.batch_id,
+	      a.step_id, --步骤id
+	      a.day_date
+	    from tmp_rst_ra_sku_org_detail a
+	    where exists ( select 1 from tmp_org_skc_union b where
+	    	(a.human_allot_out_org_sk=b.org_sk and a.skc_sk=b.skc_sk)
+	    	or (a.human_allot_in_org_sk=b.org_sk and a.skc_sk=b.skc_sk)
+	    	or (a.model_allot_out_org_sk=b.org_sk and a.skc_sk=b.skc_sk)
+	    	or (a.model_allot_in_org_sk=b.org_sk and a.skc_sk=b.skc_sk)
+	    )
+	--     inner join tmp_skc_union b on a.skc_sk=b.skc_sk
+	--     and a.day_date='2024-04-23' --and a.ra_source in ('0','2')
+	--     and a.is_deleted = '0'
+('cost:', 2.03)
+    --获取人工目标款店 skc-org
+	    drop table if exists tmp_target_human_skc_org;
+	    create table tmp_target_human_skc_org as
+	    select org_sk,skc_sk
+	    from (
+	        select human_allot_out_org_sk as org_sk,skc_sk
+	        from tmp_sku_target
+	        union all
+	        select human_allot_in_org_sk as org_sk,skc_sk
+	        from tmp_sku_target
+	        union all
+	        select model_allot_out_org_sk as org_sk,skc_sk
+	        from tmp_sku_target
+	        union all
+	        select model_allot_in_org_sk as org_sk,skc_sk
+	        from tmp_sku_target
+	    ) aa
+	    group by org_sk,skc_sk
+	    ;
+('cost:', 0.0)
+--获取skc1-门店C --该部分skc-org组合使用biz.skc指标，skc1-门店A、B库存指标重新计算
+	    drop table if exists tmp_skc_org_store_c; --作为后续门店C指标主表
+	    create table tmp_skc_org_store_c as
+	    select a.skc_sk,a.org_sk
+	    from tmp_target_human_skc_org a --与a表A、B门店匹配不上
+	    left join tmp_org_skc_union b on a.skc_sk=b.skc_sk and a.org_sk=b.org_sk
+	    where b.org_sk is null
+	    ;
+('cost:', 0.0)
+    drop table if exists tmp_rst_sku;
+	    create table tmp_rst_sku as
+	    select distinct c.sku_sk::text sku_sk,c.skc_sk::text skc_sk,c.size_code,c.size_group_code
+	    ,c.virtual_suit as virtual_suit_code,c.age_group as reserved9,c.order_level as reserved10
+	    from gp.tenant_hggp7_dm.dim_sku c
+	    where exists (select 1 from tmp_sku_target t where c.skc_sk::int =t.skc_sk::int)
+	    ;
+('cost:', 1.08)
+   --补录sku数据
+	    drop table if exists tmp_sku_target_group ;
+	    create table tmp_sku_target_group as
+	    select  a.skc_order_id
+	      ,a.human_allot_out_org_sk,a.human_allot_in_org_sk
+	      ,a.skc_sk,a.scene_code,a.ra_source
+	    from tmp_sku_target a
+	    group by a.skc_order_id,a.human_allot_out_org_sk,a.human_allot_in_org_sk,a.skc_sk,a.scene_code,a.ra_source
+	    ;
+('cost:', 0.08)
+ --tmp_target_order_id_size 目标单据补全尺码
+	    drop table if exists tmp_target_order_id_size;
+	    create table tmp_target_order_id_size as
+	    select  a.skc_order_id,
+	      a.human_allot_out_org_sk,a.human_allot_in_org_sk
+	      ,a.skc_sk,scene_code,ra_source
+	      ,b.size_code
+	    from tmp_sku_target_group a
+	    left join tmp_rst_sku b on a.skc_sk=b.skc_sk
+	    ;
+('cost:', 0.0)
+drop table if exists tmp_sku_target_group ;
+	    --数据汇总
+	    drop table if exists tmp1;
+	    create table tmp1 as
+	    select a.skc_order_id,
+	      a.human_allot_out_org_sk,a.human_allot_in_org_sk,
+	      a.skc_sk,
+	      a.size_code,
+	      sum(b.model_ra_qty) as model_ra_qty,sum(b.human_ra_qty) as human_ra_qty
+	    from tmp_target_order_id_size a
+	    left join tmp_sku_target b on a.skc_order_id=b.skc_order_id and a.size_code=b.size_code --and b.day_date ='2024-04-23'
+	    group by grouping sets((1,2,3,4,5),(1,2,3,4))
+	    ;
+('cost:', 0.01)
+    --tmp2 将补调量组合成json格式
+	    drop table if exists tmp2 ;
+	    create table tmp2 as
+	    select a.skc_order_id,
+	      a.human_allot_out_org_sk,human_allot_in_org_sk,
+	      a.skc_sk,
+	      json_group_array(json_object('key', coalesce(a.size_code,'total'), 'value', model_ra_qty)) as model_ra_qty,
+	      json_group_array(json_object('key', coalesce(a.size_code,'total'), 'value', human_ra_qty)) as human_ra_qty
+	    from tmp1 a
+	    group by 1,2,3,4
+	    ;
+('cost:', 0.0)
+drop table if exists tmp1 ;
+	
+	    --增加过滤器 --处理到org+skc+场景+来源 后续也按这个粒度更新，如相同款店组合场景+来源分别多对一更新
+	    drop table if exists tmpx;
+	    create table tmpx as
+	    select org_sk,skc_sk,size_code,scene_code,ra_source,0 as is_url
+	    from
+	    (
+	    select human_allot_out_org_sk org_sk,skc_sk,size_code,scene_code,ra_source
+	    from tmp_target_order_id_size
+	    union
+	    select human_allot_in_org_sk org_sk,skc_sk,size_code,scene_code,ra_source
+	    from tmp_target_order_id_size
+	    ) t
+	    group by 1,2,3,4,5
+	    ;
+('cost:', 0.01)
+drop table if exists tmp_target_order_id_size;
+	    --tmp_sku_org_distinct sku-org组合 用于过滤
+	    drop table if exists tmp_sku_org_distinct;
+	    create table tmp_sku_org_distinct as
+	    select distinct org_sk,sku_sk,t1.size_code
+	    from tmpx t1
+	    inner join tmp_rst_sku t2 on t1.skc_sk=t2.skc_sk and t1.size_code=t2.size_code
+	    ;
+('cost:', 0.0)
+--获取stock库存数据
+	    drop table if exists tmp_ra_sku_org_stock;
+	    create table tmp_ra_sku_org_stock as
+	    with a as(select * from postgres_query('gp',$$
+	    select a.sku_sk,a.skc_sk,a.org_sk,a.committed_onorder_out_qty,a.forecast_available_stock_qty
+	    from tenant_hggp7_biz.rst_ra_sku_org_stock a
+	    where a.day_date='2024-04-23'$$)
+	    )select a.*,b.size_code
+	     from a
+	    inner join tmp_sku_org_distinct b on a.sku_sk=b.sku_sk and a.org_sk=b.org_sk
+	    ;
+('cost:', 36.52)
+--获取实时库存数据
+	    drop table if exists tmp_ra_sku_org_stock_realtime;
+	    create table tmp_ra_sku_org_stock_realtime as
+	    select a.skc_sk,a.org_sk,b.size_code
+	    ,a.realtime_forecast_available_stock_qty
+	    ,a.realtime_before_ra_stock_qty
+	    ,a.realtime_onorder_out_stock_qty
+	    ,a.realtime_onorder_in_stock_qty
+	    ,a.realtime_onroad_stock_qty
+	    ,a.reserved16
+	    from gp.tenant_hggp7_biz.rst_ra_sku_org_stock_realtime a
+	    inner join tmp_sku_org_distinct b on a.sku_sk=b.sku_sk and a.org_sk=b.org_sk
+	    where a.day_date='2024-04-23'
+	    ;
+('cost:', 0.08)
+--获取实时库存数据 聚合到skc_sk+org_sk
+	    drop table if exists tmp_ra_sku_org_stock_realtime_skc;
+	    create table tmp_ra_sku_org_stock_realtime_skc as
+	    select a.skc_sk,a.org_sk
+	    from tmp_ra_sku_org_stock_realtime a
+	    group by a.skc_sk,a.org_sk
+	    ;
+('cost:', 0.0)
+    -- tmp_target_skc_org 获取目标skc-org用于过滤
+	    drop table if exists tmp_target_skc_org;
+	    create temporary table tmp_target_skc_org as
+	    select skc_sk,human_allot_out_org_sk as org_sk
+	    from tmp_rst_ra_sku_org_detail
+	    group by skc_sk,human_allot_out_org_sk
+	    union
+	    select skc_sk,human_allot_in_org_sk as org_sk
+	    from tmp_rst_ra_sku_org_detail
+	    group by skc_sk,human_allot_in_org_sk
+	    ;
+('cost:', 0.3)
+    drop table if exists tmp_target_skc_org_filter;
+	    create temporary table tmp_target_skc_org_filter as
+	    select skc_sk,org_sk
+	    from tmp_target_skc_org
+	    where org_sk is not null
+	    group by skc_sk,org_sk
+	    ;
+('cost:', 0.11)
+   drop table if exists tmp_target_skc_org;
+	    -- tmp_ra_sku_org_data data销售指标 --排序
+	    drop table if exists tmp_ra_sku_org_data_pre;
+	    create temporary table tmp_ra_sku_org_data_pre as
+	select * from postgres_query('gp',$$
+	    select  a.*
+	    from tenant_hggp7_biz.rst_ra_sku_org_data a
+	    where a.day_date = '2024-04-23'
+	$$)
+	    ;
+('cost:', 134.99)
+    drop table if exists tmp_ra_sku_org_data;
+	    create temporary table tmp_ra_sku_org_data as
+	    select a.*
+	    from tmp_ra_sku_org_data_pre a
+	    inner join tmp_target_skc_org_filter b on a.skc_sk=b.skc_sk and a.org_sk=b.org_sk
+('cost:', 13.79)
+
+	    drop table if exists tmp_ra_sku_org_data_pre;
+	    create table tmp_ra_sku_org_data_pre as
+	    select  a.*
+	    from gp.tenant_hggp7_biz.rst_ra_sku_org_data a
+	    where a.day_date = '2024-04-23'
+	    ;
+('cost:', 133.7) -- todo
+    drop table if exists tmp_sku_org_distinct;
+	    --tmp_ra_sku_org_data_filter_sales 过滤有过销售款店 --用于计算粗粒度销售，不能过滤款店
+	    drop table if exists tmp_ra_sku_org_data_filter_sales;
+	    create temporary table tmp_ra_sku_org_data_filter_sales as
+	    select  *
+	    from tmp_ra_sku_org_data
+	    where total_sales_qty>0
+	    ;
+('cost:', 1.49)
+    drop table if exists tmp_ra_sku_org_data;
+	    --从data表当中读取计算的相关数据指标
+	    drop table  if exists tmp3;
+	    create table tmp3 as
+	    select c.org_sk stockorg_sk,c.skc_sk ,a.history_first_distribution_date,a.first_distribution_date,a.sales_level_code sales_level
+	    ,c.scene_code,c.ra_source
+	    ,c.size_code
+	    ,sum(a.last_7days_sales_qty) last_7days_sales_qty
+	    ,sum(a.last_7_14days_sales_qty) last_7_14days_sales_qty
+	    ,sum(a.total_sales_qty) total_sales_qty
+	    --,sum(case when c.scene_code in ('9','12') and c.ra_source in ('1','2') then coalesce(a.realtime_before_ra_stock_qty,a.before_ra_stock_qty) else a.before_ra_stock_qty end ) as before_ra_stock_qty
+	    --1 补调单来源-非实时 ->非实时库存
+	    --2 补调单来源-实时 1)有实时接口 ->实时库存,补0 2)无实时接口 ->非实时库存
+	    --3 补调单来源-人工新增/规则数据 有实时用实时，否则用非实时
+	    --4 其他-有实时用实时，否则用非实时
+	    ,sum(case when c.ra_source in ('0') then a.before_ra_stock_qty
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(a.realtime_before_ra_stock_qty,0)
+	    when c.ra_source in ('1') and c.is_url=0 then a.before_ra_stock_qty
+	    when c.ra_source in ('2','3') then coalesce(a.realtime_before_ra_stock_qty,a.before_ra_stock_qty)
+	    else coalesce(a.realtime_before_ra_stock_qty,a.before_ra_stock_qty) end ) as before_ra_stock_qty
+	    ,sum(case when c.ra_source in ('0') then a.before_ra_sub_stock_qty
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(a.realtime_before_ra_sub_stock_qty,0)
+	    when c.ra_source in ('1') and c.is_url=0 then a.before_ra_sub_stock_qty
+	    when c.ra_source in ('2','3') then coalesce(a.realtime_before_ra_sub_stock_qty,a.before_ra_sub_stock_qty)
+	    else coalesce(a.realtime_before_ra_sub_stock_qty,a.before_ra_sub_stock_qty) end ) as before_ra_sub_stock_qty
+	    ,sum(case when c.ra_source in ('0') then a.after_model_ra_stock_qty
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(a.realtime_after_model_ra_stock_qty,0)
+	    when c.ra_source in ('1') and c.is_url=0 then a.after_model_ra_stock_qty
+	    when c.ra_source in ('2','3') then coalesce(a.realtime_after_model_ra_stock_qty,a.after_model_ra_stock_qty)
+	    else coalesce(a.realtime_after_model_ra_stock_qty,a.after_model_ra_stock_qty) end ) as after_model_ra_stock_qty --'模型补调后库存'
+	    ,sum(coalesce(a.after_model_ra_stock_qty,0)+coalesce(a.onroad_stock_qty,0)) as after_model_ra_onroad_stock_qty --模型补调后库存（含在途）
+	    ,sum(case when c.ra_source in ('0') then a.after_ra_sub_stock_qty
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(a.realtime_after_ra_sub_stock_qty,0)
+	    when c.ra_source in ('1') and c.is_url=0 then a.after_ra_sub_stock_qty
+	    when c.ra_source in ('2','3') then coalesce(a.realtime_after_ra_sub_stock_qty,a.after_ra_sub_stock_qty)
+	    else coalesce(a.realtime_after_ra_sub_stock_qty,a.after_ra_sub_stock_qty) end ) as after_ra_sub_stock_qty --补调后库存（减在单出）
+	    ,sum(case when c.ra_source in ('0') then a.after_model_ra_include_stock_qty
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(a.realtime_after_model_ra_include_stock_qty,0)
+	    when c.ra_source in ('1') and c.is_url=0 then a.after_model_ra_include_stock_qty
+	    when c.ra_source in ('2','3') then coalesce(a.realtime_after_model_ra_include_stock_qty,a.after_model_ra_include_stock_qty)
+	    else coalesce(a.realtime_after_model_ra_include_stock_qty,a.after_model_ra_include_stock_qty) end ) as after_model_ra_include_stock_qty --'模型补调后库存（含在单在途）'
+	    ,sum(case when c.ra_source in ('0') then a.onroad_stock_qty
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(e.realtime_onroad_stock_qty,0)
+	    when c.ra_source in ('1') and c.is_url=0 then a.onroad_stock_qty
+	    when c.ra_source in ('2','3') then coalesce(e.realtime_onroad_stock_qty,a.onroad_stock_qty)
+	    else coalesce(e.realtime_onroad_stock_qty,a.onroad_stock_qty) end ) as onroad_stock_qty
+	    ,sum(case when c.ra_source in ('0') then a.onorder_in_stock_qty
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(e.realtime_onorder_in_stock_qty,0)
+	    when c.ra_source in ('1') and c.is_url=0 then a.onorder_in_stock_qty
+	    when c.ra_source in ('2','3') then coalesce(e.realtime_onorder_in_stock_qty,a.onorder_in_stock_qty)
+	    else coalesce(e.realtime_onorder_in_stock_qty,a.onorder_in_stock_qty) end ) as onorder_in_stock_qty
+	    ,sum(case when c.ra_source in ('0') then a.onorder_out_stock_qty
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(e.realtime_onorder_out_stock_qty,0)
+	    when c.ra_source in ('1') and c.is_url=0 then a.onorder_out_stock_qty
+	    when c.ra_source in ('2','3') then coalesce(e.realtime_onorder_out_stock_qty,a.onorder_out_stock_qty)
+	    else coalesce(e.realtime_onorder_out_stock_qty,a.onorder_out_stock_qty) end ) as onorder_out_stock_qty
+	    --,sum(d.committed_onorder_out_qty) as committed_onorder_out_qty
+	    --已提交按来源区分 d.committed_onorder_out_qty e.reserved16
+	    ,sum(case when c.ra_source in ('0') then coalesce(d.committed_onorder_out_qty,0)
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(e.reserved16,0)
+	    when c.ra_source in ('1') and c.is_url=0 then coalesce(d.committed_onorder_out_qty,0)
+	    --when c.ra_source in ('2','3') then coalesce(e.reserved16,coalesce(d.committed_onorder_out_qty,0))
+	    --else coalesce(e.reserved16,coalesce(d.committed_onorder_out_qty,0)) end ) as committed_onorder_out_qty
+	    when c.ra_source in ('2','3') and f.skc_sk is not null then coalesce(e.reserved16,0)
+	    when c.ra_source in ('2','3') and f.skc_sk is null then coalesce(d.committed_onorder_out_qty,0)
+	    else coalesce(d.committed_onorder_out_qty,0) end ) as committed_onorder_out_qty
+	    ,sum(case when c.ra_source in ('0') then d.forecast_available_stock_qty
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(e.realtime_forecast_available_stock_qty,0)
+	    when c.ra_source in ('1') and c.is_url=0 then d.forecast_available_stock_qty
+	    when c.ra_source in ('2','3') then coalesce(e.realtime_forecast_available_stock_qty,d.forecast_available_stock_qty)
+	    else coalesce(e.realtime_forecast_available_stock_qty,d.forecast_available_stock_qty) end ) as forecast_available_stock_qty
+	    ,sum(case when c.ra_source in ('0') then a.before_ra_onroad_stock_qty
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(a.realtime_before_ra_onroad_stock_qty,0)
+	    when c.ra_source in ('1') and c.is_url=0 then a.before_ra_onroad_stock_qty
+	    when c.ra_source in ('2','3') then coalesce(a.realtime_before_ra_onroad_stock_qty,a.before_ra_onroad_stock_qty)
+	    else coalesce(a.realtime_before_ra_onroad_stock_qty,a.before_ra_onroad_stock_qty) end ) as before_ra_onroad_stock_qty
+	    ,sum(case when c.ra_source in ('0') then a.before_ra_include_stock_qty
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(a.realtime_before_ra_include_stock_qty,0)
+	    when c.ra_source in ('1') and c.is_url=0 then a.before_ra_include_stock_qty
+	    when c.ra_source in ('2','3') then coalesce(a.realtime_before_ra_include_stock_qty,a.before_ra_include_stock_qty)
+	    else coalesce(a.realtime_before_ra_include_stock_qty,a.before_ra_include_stock_qty) end ) as before_ra_include_stock_qty
+	    ,sum(case when c.ra_source in ('0') then a.after_ra_wh_sub_stock_total_qty
+	    when c.ra_source in ('1') and c.is_url=1 then coalesce(a.realtime_after_ra_wh_sub_stock_total_qty,0)
+	    when c.ra_source in ('1') and c.is_url=0 then a.after_ra_wh_sub_stock_total_qty
+	    when c.ra_source in ('2','3') then coalesce(a.realtime_after_ra_wh_sub_stock_total_qty,a.after_ra_wh_sub_stock_total_qty)
+	    else coalesce(a.realtime_after_ra_wh_sub_stock_total_qty,a.after_ra_wh_sub_stock_total_qty) end ) as after_ra_wh_sub_stock_total_qty
+	
+	    from tmpx c
+	    left join tmp_ra_sku_org_data_filter a on c.org_sk=a.org_sk and c.skc_sk=a.skc_sk and c.size_code=a.size_code --and a.day_date='2024-04-23'
+	    left join tmp_ra_sku_org_stock d on c.org_sk=d.org_sk and c.skc_sk=d.skc_sk and c.size_code=d.size_code
+	    left join tmp_ra_sku_org_stock_realtime e on c.org_sk=e.org_sk and c.skc_sk=e.skc_sk and c.size_code=e.size_code
+	    left join tmp_ra_sku_org_stock_realtime_skc f on c.org_sk=f.org_sk and c.skc_sk=f.skc_sk
+	    group by
+	    grouping sets((1,2,3,4,5,6,7,8),(1,2,3,4,5,6,7))
+	    ;

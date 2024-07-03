@@ -1,0 +1,22 @@
+{
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "driver": "DuckDB",
+            "name": "peacebird",
+            "group": "duck",
+            "database": ":memory:"
+        },
+        {
+            "previewLimit": 50,
+            "server": "192.168.200.75",
+            "port": 2345,
+            "driver": "PostgreSQL",
+            "name": "hggp7",
+            "group": "gp7",
+            "database": "mdmaster_hggp7_dev",
+            "username": "gpadmin"
+        }
+    ],
+    "sqltools.useNodeRuntime": true
+}
